@@ -1,0 +1,66 @@
+# Default-deny, then allow only what Sentinel needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sentinel-api-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: sentinel-api}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: ingress-nginx}
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}   # Alertmanager + Prometheus
+      ports:
+        - {port: 8000, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sentinel-worker-ingress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/name: sentinel-worker}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+      ports:
+        - {port: 9100, protocol: TCP}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: sentinel-egress
+spec:
+  podSelector:
+    matchLabels: {app.kubernetes.io/part-of: sentinel}
+  policyTypes: [Egress]
+  egress:
+    - to:   # DNS
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels: {k8s-app: kube-dns}
+      ports:
+        - {port: 53, protocol: UDP}
+        - {port: 53, protocol: TCP}
+    - to:   # telemetry backends + collector
+        - namespaceSelector:
+            matchLabels: {kubernetes.io/metadata.name: monitoring}
+    - to:   # PostgreSQL (managed DB CIDR; adjust per environment)
+        - ipBlock: {cidr: 10.0.0.0/8}
+      ports:
+        - {port: 5432, protocol: TCP}
+    - ports:   # HTTPS egress: LLM providers + notification webhooks
+        - {port: 443, protocol: TCP}

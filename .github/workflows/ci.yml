@@ -1,0 +1,142 @@
+# CI: quality gates -> tests (SQLite + PostgreSQL) -> security scans -> image build & scan
+#     -> deployment-config validation -> full-stack end-to-end test.
+name: ci
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: sentinel
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {python-version: "3.12", enable-cache: true}
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff check src tests
+      - run: uv run ruff format --check src
+      - run: uv run mypy
+      - name: Lock file is up to date
+        run: uv lock --check
+
+  test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:17.6-alpine
+        env: {POSTGRES_USER: sentinel, POSTGRES_PASSWORD: sentinel, POSTGRES_DB: sentinel_test}
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U sentinel" --health-interval 5s --health-retries 20
+    env:
+      SENTINEL_TEST_DATABASE_URL: postgresql+psycopg://sentinel:sentinel@localhost:5432/sentinel_test
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {python-version: "3.12", enable-cache: true}
+      - run: uv sync --frozen --extra dev
+      - name: Unit + integration tests (SQLite and PostgreSQL)
+        run: uv run pytest --cov --cov-report=xml --cov-fail-under=85 --junitxml=junit.xml
+      - name: Migrations against PostgreSQL
+        env: {SENTINEL_DATABASE_URL: "${{ env.SENTINEL_TEST_DATABASE_URL }}"}
+        run: |
+          uv run sentinel migrate
+          uv run alembic check
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with: {name: test-reports, path: "sentinel/coverage.xml\nsentinel/junit.xml"}
+
+  security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: {fetch-depth: 0}
+      - uses: astral-sh/setup-uv@v6
+        with: {python-version: "3.12", enable-cache: true}
+      - run: uv sync --frozen --extra dev
+      - name: Static analysis (bandit)
+        run: uv run bandit -q -r src -c pyproject.toml
+      - name: Dependency vulnerabilities (pip-audit)
+        run: |
+          uv export --frozen --no-dev --no-hashes --no-emit-project > /tmp/req.txt
+          uv run pip-audit -r /tmp/req.txt --strict
+      - name: Secret scan (gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env: {GITHUB_TOKEN: "${{ secrets.GITHUB_TOKEN }}"}
+
+  images:
+    runs-on: ubuntu-latest
+    needs: [quality, test]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build sentinel
+        uses: docker/build-push-action@v6
+        with: {context: sentinel, load: true, tags: "sentinel:ci", cache-from: type=gha, cache-to: "type=gha,mode=max"}
+      - name: Build shop demo
+        uses: docker/build-push-action@v6
+        with: {context: demo-services/shop, load: true, tags: "shop:ci"}
+      - name: Scan sentinel image (Trivy)
+        uses: aquasecurity/trivy-action@0.33.1
+        with: {image-ref: "sentinel:ci", severity: "CRITICAL,HIGH", ignore-unfixed: true, exit-code: "1"}
+
+  deploy-config:
+    runs-on: ubuntu-latest
+    defaults:
+      run: {working-directory: .}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Compose config
+        run: |
+          cp deploy/compose/.env.example deploy/compose/.env
+          docker compose -f deploy/compose/docker-compose.yml config -q
+      - name: Kustomize render + schema validation
+        run: |
+          cp deploy/k8s/overlays/dev/secrets.env.example deploy/k8s/overlays/dev/secrets.env
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.7.0/kubeconform-linux-amd64.tar.gz | tar xz
+          for o in dev prod; do
+            kubectl kustomize deploy/k8s/overlays/$o | ./kubeconform -strict -summary -ignore-missing-schemas -
+          done
+      - name: Prometheus rules
+        run: |
+          docker run --rm -v "$PWD/deploy/compose/prometheus:/p" --entrypoint promtool prom/prometheus:v3.5.0 check rules /p/rules/shop-slo.yml /p/rules/platform.yml
+      - name: Alertmanager config
+        run: |
+          docker run --rm -v "$PWD/deploy/compose/alertmanager:/a" --entrypoint amtool prom/alertmanager:v0.28.1 check-config /a/alertmanager.yml
+      - name: Dashboards are generated from source
+        run: |
+          python3 deploy/compose/grafana/build_dashboards.py
+          git diff --exit-code deploy/compose/grafana/dashboards
+
+  e2e:
+    runs-on: ubuntu-latest
+    needs: [images, deploy-config]
+    if: github.event_name != 'pull_request' || contains(github.event.pull_request.labels.*.name, 'run-e2e')
+    defaults:
+      run: {working-directory: .}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with: {python-version: "3.12"}
+      - run: scripts/bootstrap-env.sh
+      - run: docker compose -f deploy/compose/docker-compose.yml up -d --build --wait
+      - name: Let baseline traffic accumulate
+        run: sleep 90
+      - run: cd sentinel && uv sync --frozen --extra dev && uv run pytest -m e2e tests/e2e -s
+      - name: Dump logs on failure
+        if: failure()
+        run: docker compose -f deploy/compose/docker-compose.yml logs --tail 200

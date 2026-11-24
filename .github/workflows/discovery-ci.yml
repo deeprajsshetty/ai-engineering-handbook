@@ -1,0 +1,131 @@
+# CI for discovery/ (the Go discovery and topology service that feeds Sentinel).
+# Moved here from discovery/.github/workflows/, where GitHub never ran it.
+# `run:` steps execute inside discovery/; `uses:` inputs are repo-root relative.
+# Every step calls a Makefile target so Jenkins or GitLab CI can run the same stages.
+#
+# Supply chain: actions are referenced by major tag here; pin them to commit
+# SHAs (for example with Renovate) before relying on this in production.
+name: discovery-ci
+on:
+  pull_request:
+    paths: ["discovery/**", ".github/workflows/discovery-ci.yml"]
+  push:
+    branches: [master]
+    paths: ["discovery/**", ".github/workflows/discovery-ci.yml"]
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: discovery-ci-${{ github.ref }}
+  cancel-in-progress: true
+
+defaults:
+  run:
+    working-directory: discovery
+
+jobs:
+  verify:
+    name: lint, type-check, unit/contract/migration/API tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18.3-alpine
+        env: { POSTGRES_USER: obs, POSTGRES_PASSWORD: ci-only, POSTGRES_DB: obs_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U obs" --health-interval 5s --health-timeout 3s --health-retries 20
+    env:
+      OBS_TEST_DATABASE_URL: postgres://obs:ci-only@localhost:5432/obs_test?sslmode=disable
+      OBS_TEST_REQUIRE_DB: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version-file: discovery/platform/go.mod, cache-dependency-path: discovery/platform/go.sum }
+      - uses: actions/setup-node@v7
+        with: { node-version: "24.21.0", cache: npm, cache-dependency-path: discovery/platform/web/package-lock.json }
+      - run: make deps
+      - run: make lint
+      - run: make typecheck
+      - run: make test
+      - name: Dependency vulnerability scan
+        run: make vuln
+      - uses: azure/setup-helm@v5
+      - name: Helm lint and render (public and private overlays)
+        run: |
+          helm lint deploy/helm/obs-platform
+          for v in values-public-cloud.yaml values-private-cloud.yaml values-dev.yaml; do
+            helm template t deploy/helm/obs-platform --kube-version 1.31.0 -f deploy/helm/obs-platform/$v > /dev/null
+          done
+          helm template t deploy/helm/obs-platform --kube-version 1.31.0 \
+            -f deploy/helm/obs-platform/values-private-cloud.yaml -f deploy/helm/obs-platform/values-oracle.yaml > /dev/null
+
+  oracle-store:
+    name: Oracle platform store (contract + API end-to-end)
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    services:
+      postgres: # the API suite's database-monitoring tests still target PostgreSQL
+        image: postgres:18.3-alpine
+        env: { POSTGRES_USER: obs, POSTGRES_PASSWORD: ci-only, POSTGRES_DB: obs_test }
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd "pg_isready -U obs" --health-interval 5s --health-timeout 3s --health-retries 20
+      oracle:
+        image: gvenzl/oracle-free:23-slim-faststart
+        env: { ORACLE_PASSWORD: ci-only-Oracle1 }
+        ports: ["1521:1521"]
+        options: >-
+          --health-cmd healthcheck.sh --health-interval 10s --health-timeout 5s --health-retries 30
+    env:
+      OBS_TEST_DATABASE_URL: postgres://obs:ci-only@localhost:5432/obs_test?sslmode=disable
+      OBS_TEST_REQUIRE_DB: "1"
+      OBS_TEST_ORACLE_ADMIN_URL: oracle://system:ci-only-Oracle1@localhost:1521/FREEPDB1
+      OBS_TEST_REQUIRE_ORACLE: "1"
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version-file: discovery/platform/go.mod, cache-dependency-path: discovery/platform/go.sum }
+      - name: Store contract on Oracle and PostgreSQL; Oracle monitoring engine on a live CDB
+        run: cd platform && go test -race -count=1 ./internal/store/... ./internal/dbengine/...
+      - name: API end-to-end suite with Oracle as the platform store
+        run: cd platform && OBS_TEST_STORE=oracle go test -race -count=1 ./internal/api/
+
+  package:
+    name: image, SBOM, scan, smoke
+    needs: verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-go@v7
+        with: { go-version-file: discovery/platform/go.mod, cache-dependency-path: discovery/platform/go.sum }
+      - uses: docker/setup-buildx-action@v4
+      - name: Build image (immutable, version and commit embedded)
+        run: make docker-build IMAGE=obsplatform:ci-${{ github.sha }} VERSION=ci-${{ github.sha }} COMMIT=${{ github.sha }}
+      - name: Image vulnerability scan
+        uses: aquasecurity/trivy-action@v0.36.0
+        with:
+          image-ref: obsplatform:ci-${{ github.sha }}
+          severity: CRITICAL,HIGH
+          exit-code: "1"
+          ignore-unfixed: true
+      - name: Secret scan of the repository
+        uses: aquasecurity/trivy-action@v0.36.0
+        with: { scan-type: fs, scanners: secret, scan-ref: discovery/platform, exit-code: "1" }
+      - name: SBOM (SPDX, Syft)
+        uses: anchore/sbom-action@v0.24.3
+        with: { image: "obsplatform:ci-${{ github.sha }}", format: spdx-json, output-file: discovery/sbom.spdx.json }
+      - name: End-to-end smoke test in containers
+        run: |
+          docker tag obsplatform:ci-${{ github.sha }} obsplatform:local
+          docker compose -f deploy/compose/docker-compose.yml up -d --no-build
+          make smoke URL=http://localhost:8080
+      - if: always()
+        run: docker compose -f deploy/compose/docker-compose.yml logs --no-color > compose.log || true
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with: { name: platform-artifacts, path: "discovery/sbom.spdx.json\ndiscovery/compose.log" }
+      # Publishing is deliberately not configured: push the scanned image by
+      # digest to your registry (Harbor/ECR/ACR/GAR) and promote that same
+      # digest through environments. See docs/operations/sdlc-and-cicd.md.

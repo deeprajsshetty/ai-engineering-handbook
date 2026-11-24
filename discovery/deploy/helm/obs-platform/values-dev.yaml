@@ -1,0 +1,14 @@
+# Throwaway evaluation cluster (kind, k3d, minikube) only: development auth
+# with the documented demo tokens. Never use on a shared or production cluster.
+env:
+  OBS_ENV: development
+  OBS_AUTH_MODE: dev
+  OBS_OIDC_ISSUER: ""
+  OBS_OIDC_AUDIENCE: ""
+api:
+  replicas: 1
+image:
+  repository: obsplatform
+  tag: local
+podDisruptionBudget:
+  enabled: false

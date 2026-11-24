@@ -1,0 +1,7 @@
+obs-platform {{ .Chart.AppVersion }} installed as {{ include "obs.fullname" . }}.
+{{- if eq .Values.env.OBS_AUTH_MODE "oidc" }}
+NOTE: OBS_AUTH_MODE=oidc is a defined seam that is NOT implemented in this MVP;
+the API pods will fail fast at start-up. Use values-dev.yaml on a throwaway
+evaluation cluster only, or implement the OIDC authenticator (ADR 0006).
+{{- end }}
+Health:  kubectl port-forward svc/{{ include "obs.fullname" . }} 8080:{{ .Values.service.port }} && curl localhost:8080/readyz

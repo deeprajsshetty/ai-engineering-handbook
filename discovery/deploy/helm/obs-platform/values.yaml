@@ -1,0 +1,106 @@
+# Defaults are portable: nothing here is specific to a cloud vendor. Put
+# environment specifics in an overlay (see values-public-cloud.yaml and
+# values-private-cloud.yaml).
+
+image:
+  repository: registry.example.internal/obsplatform   # your registry (Harbor, ECR, ACR, GAR, ...)
+  tag: ""                                              # defaults to .Chart.AppVersion; prefer a digest below
+  digest: ""                                           # e.g. sha256:...; when set it wins over tag
+  pullPolicy: IfNotPresent
+imagePullSecrets: []
+
+# The binary runs API and workers; the chart deploys them separately so they
+# scale and fail independently (OBS_ROLES).
+api:
+  replicas: 2
+  resources:
+    requests: { cpu: 100m, memory: 128Mi }
+    limits: { memory: 512Mi }
+worker:
+  replicas: 1
+  resources:
+    requests: { cpu: 100m, memory: 256Mi }
+    limits: { memory: 1Gi }
+
+env:
+  OBS_ENV: production
+  OBS_AUTH_MODE: oidc          # dev mode is refused in production; OIDC is a seam not implemented in the MVP (ADR 0006)
+  OBS_OIDC_ISSUER: ""
+  OBS_OIDC_AUDIENCE: ""
+  OBS_LOG_FORMAT: json
+  OBS_LOG_LEVEL: info
+  OBS_DISCOVERY_WORKERS: "2"
+  OBS_METRICS_INTERVAL: 60s
+  OBS_METRIC_RETENTION: 168h
+  OBS_TOPOLOGY_PURGE_AFTER: 168h
+  OBS_EGRESS_ALLOWLIST: ""     # comma list of provider API hosts, e.g. "*.eks.amazonaws.com,10.20.0.5"
+
+# The database URL comes from a Secret you create (or sync with External
+# Secrets Operator). The chart never contains credentials.
+database:
+  # postgres (default) or oracle (Oracle Database 19c+, ADR 0011). The URL in
+  # the Secret must match: postgres://… or oracle://user:password@host:1521/service
+  driver: postgres
+  existingSecret: obsplatform-db
+  urlKey: DATABASE_URL
+
+# Provider credentials referenced by connections as file:<name> are mounted
+# from this Secret into OBS_SECRET_DIR.
+providerSecrets:
+  existingSecret: ""           # e.g. obsplatform-provider-credentials
+  mountPath: /var/run/secrets/obs
+
+migrations:
+  enabled: true                # pre-install/pre-upgrade hook Job runs `obsplatform migrate up`
+
+service:
+  port: 80
+
+# Edge routing: Gateway API is preferred (ingress-nginx is retired upstream);
+# Ingress is a fallback for older clusters. Enable one.
+gateway:
+  enabled: false
+  parentRefs: []               # - name: shared-gateway, namespace: gateway-system
+  hostnames: []
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts: []                    # - obs.example.com
+  tls: []                      # - secretName: obs-tls, hosts: [obs.example.com]
+
+networkPolicy:
+  enabled: true
+  # Namespaces allowed to reach the API (gateway/ingress controller namespace).
+  ingressFromNamespaces: []
+  # Egress the workers need beyond DNS and the database: provider API CIDRs.
+  providerEgressCIDRs: []      # e.g. ["10.20.0.0/24"]
+  databaseCIDRs: []            # if the database is outside the cluster
+  databasePort: 5432
+
+podDisruptionBudget:
+  enabled: true
+  minAvailable: 1
+
+serviceMonitor:
+  enabled: false               # requires the Prometheus Operator CRDs
+
+# Optional example RBAC for the *target* cluster when this cluster is also
+# discovered by the Kubernetes provider (read-only list/get/watch).
+discoveryRBAC:
+  create: false
+
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  seccompProfile: { type: RuntimeDefault }
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities: { drop: ["ALL"] }
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

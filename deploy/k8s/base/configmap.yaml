@@ -1,0 +1,23 @@
+# Non-secret configuration. Secrets (DB URL, API key hashes, tokens, LLM keys) come from the
+# `sentinel-secrets` Secret, which should be synced from a secret manager (External Secrets
+# Operator / Sealed Secrets / CSI driver) - never committed. See docs/SECURITY.md.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sentinel-config
+data:
+  SENTINEL_ENV: prod
+  SENTINEL_LOG_LEVEL: INFO
+  SENTINEL_PROMETHEUS_URL: http://prometheus-operated.monitoring.svc:9090
+  SENTINEL_LOKI_URL: http://loki-gateway.monitoring.svc
+  SENTINEL_TEMPO_URL: http://tempo.monitoring.svc:3200
+  SENTINEL_LLM_PROVIDER: deterministic
+  SENTINEL_OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector.monitoring.svc:4318
+  SENTINEL_RATE_LIMIT_PER_MINUTE: "600"
+  # Discovery service (discovery/): infrastructure context for investigations. Leave unset until
+  # the discovery service has production auth (OIDC or service tokens). Its dev tokens are
+  # refused when OBS_ENV=production. Then also add SENTINEL_DISCOVERY_TOKEN to sentinel-secrets,
+  # and an egress rule to the discovery namespace in networkpolicy.yaml.
+  # SENTINEL_DISCOVERY_URL: http://obs-platform.discovery.svc:8080
+  # SENTINEL_DISCOVERY_SERVICE_TYPES: k8s.deployment,k8s.service

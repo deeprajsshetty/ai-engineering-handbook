@@ -1,0 +1,96 @@
+# OpenTelemetry Collector: the single ingestion point for all telemetry.
+# Services send OTLP here; the collector fans out to Prometheus (metrics), Loki (logs) and
+# Tempo (traces), derives a service dependency graph from traces, and scrapes host + Postgres.
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+  hostmetrics:
+    collection_interval: 15s
+    scrapers:
+      cpu: {}
+      memory: {}
+      load: {}
+      network: {}
+      filesystem: {}
+  postgresql:
+    endpoint: postgres:5432
+    transport: tcp
+    username: ${env:POSTGRES_USER}
+    password: ${env:POSTGRES_PASSWORD}
+    databases: [sentinel]
+    collection_interval: 30s
+    tls:
+      insecure: true
+
+processors:
+  memory_limiter:
+    check_interval: 1s
+    limit_percentage: 80
+    spike_limit_percentage: 25
+  batch:
+    send_batch_size: 1024
+    timeout: 2s
+  resource/host:
+    attributes:
+      - key: service.name
+        value: infrastructure
+        action: upsert
+
+connectors:
+  # Builds traces_service_graph_request_total{client,server} from parent/child spans:
+  # Sentinel uses it for automatic dependency mapping.
+  servicegraph:
+    latency_histogram_buckets: [50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s]
+    store:
+      ttl: 5s
+      max_items: 5000
+  # RED metrics per span (APM view in Grafana).
+  spanmetrics:
+    histogram:
+      explicit:
+        buckets: [10ms, 50ms, 100ms, 250ms, 500ms, 1s, 2s, 5s]
+    dimensions:
+      - name: http.response.status_code
+
+exporters:
+  prometheus:
+    endpoint: 0.0.0.0:8889
+    resource_to_telemetry_conversion:
+      enabled: true
+  otlphttp/loki:
+    endpoint: http://loki:3100/otlp
+  otlp/tempo:
+    endpoint: tempo:4317
+    tls:
+      insecure: true
+
+service:
+  extensions: [health_check]
+  telemetry:
+    metrics:
+      level: normal
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlp/tempo, servicegraph, spanmetrics]
+    metrics:
+      receivers: [otlp, servicegraph, spanmetrics]
+      processors: [memory_limiter, batch]
+      exporters: [prometheus]
+    metrics/infra:
+      receivers: [hostmetrics, postgresql]
+      processors: [memory_limiter, resource/host, batch]
+      exporters: [prometheus]
+    logs:
+      receivers: [otlp]
+      processors: [memory_limiter, batch]
+      exporters: [otlphttp/loki]

@@ -1,0 +1,17 @@
+# Local state and build outputs
+.local/
+bin/
+dist/
+platform/web/dist/
+platform/web/node_modules/
+*.log
+.DS_Store
+
+# Local secret files for development. Never commit secrets.
+secrets/
+.env
+.env.*
+!.env.example
+
+# Build output of `make smoke` (cmd/smoke)
+platform/smoke

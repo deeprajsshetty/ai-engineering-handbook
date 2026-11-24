@@ -1,0 +1,35 @@
+{{- if .Values.migrations.enabled }}
+# Runs forward-only, backward-compatible migrations before new pods roll out.
+# Migrations hold an advisory lock, so concurrent runs serialize safely.
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ include "obs.fullname" . }}-migrate-{{ .Release.Revision }}
+  labels: {{- include "obs.labels" . | nindent 4 }}
+  annotations:
+    helm.sh/hook: pre-install,pre-upgrade
+    helm.sh/hook-weight: "-5"
+    helm.sh/hook-delete-policy: before-hook-creation,hook-succeeded
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 600
+  template:
+    metadata:
+      labels:
+        {{- include "obs.selector" . | nindent 8 }}
+        app.kubernetes.io/component: migrate
+    spec:
+      restartPolicy: Never
+      serviceAccountName: {{ include "obs.fullname" . }}
+      automountServiceAccountToken: false
+      securityContext: {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: migrate
+          image: {{ include "obs.image" . }}
+          args: ["migrate", "up"]
+          env: {{- include "obs.env" . | nindent 12 }}
+          securityContext: {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            requests: { cpu: 50m, memory: 64Mi }
+            limits: { memory: 256Mi }
+{{- end }}

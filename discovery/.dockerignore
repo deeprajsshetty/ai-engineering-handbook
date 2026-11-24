@@ -1,0 +1,6 @@
+# Keep the build context small and free of local state or secrets.
+**
+!platform/
+platform/web/node_modules/
+platform/web/dist/
+!deploy/docker/

@@ -1,0 +1,39 @@
+# Local/dev cluster (kind, minikube): single replicas, debug logs, generated dev secret.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+resources:
+  - ../../base
+images:
+  - name: sentinel
+    newName: sentinel
+    newTag: dev
+patches:
+  - target: {kind: Deployment, name: sentinel-api}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target: {kind: Deployment, name: sentinel-worker}
+    patch: |-
+      - op: replace
+        path: /spec/replicas
+        value: 1
+  - target: {kind: HorizontalPodAutoscaler, name: sentinel-api}
+    patch: |-
+      - op: replace
+        path: /spec/minReplicas
+        value: 1
+  - target: {kind: ConfigMap, name: sentinel-config}
+    patch: |-
+      - op: replace
+        path: /data/SENTINEL_ENV
+        value: dev
+      - op: replace
+        path: /data/SENTINEL_LOG_LEVEL
+        value: DEBUG
+# Dev secret is generated from a git-ignored env file: copy secrets.env.example -> secrets.env.
+secretGenerator:
+  - name: sentinel-secrets
+    envs: [secrets.env]
+    options:
+      disableNameSuffixHash: true

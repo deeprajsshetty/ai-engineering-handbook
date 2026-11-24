@@ -1,0 +1,40 @@
+- Date: !!python/object/apply:pandas._libs.tslibs.timestamps._unpickle_timestamp
+  - 1672531200000000
+  - null
+  - null
+  - 9
+  Prompt: Generate a creative story about space travel
+  Response Time (ms): 62
+  Tokens Generated: 287
+- Date: !!python/object/apply:pandas._libs.tslibs.timestamps._unpickle_timestamp
+  - 1672617600000000
+  - null
+  - null
+  - 9
+  Prompt: Write a sci-fi short story set in 2050
+  Response Time (ms): 45
+  Tokens Generated: 361
+- Date: !!python/object/apply:pandas._libs.tslibs.timestamps._unpickle_timestamp
+  - 1672704000000000
+  - null
+  - null
+  - 9
+  Prompt: Write a poem about the future of technology
+  Response Time (ms): 33
+  Tokens Generated: 221
+- Date: !!python/object/apply:pandas._libs.tslibs.timestamps._unpickle_timestamp
+  - 1672790400000000
+  - null
+  - null
+  - 9
+  Prompt: Explain quantum computing in simple terms
+  Response Time (ms): 53
+  Tokens Generated: 290
+- Date: !!python/object/apply:pandas._libs.tslibs.timestamps._unpickle_timestamp
+  - 1672876800000000
+  - null
+  - null
+  - 9
+  Prompt: Explain quantum computing in simple terms
+  Response Time (ms): 75
+  Tokens Generated: 392

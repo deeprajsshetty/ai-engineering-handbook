@@ -1,0 +1,41 @@
+# Allow-listed remediation actions. Agents can only *recommend* actions defined here, and
+# every action with requires_approval=true waits for a human operator (HITL).
+#
+# executor:
+#   http   - Sentinel calls the URL itself once approved. `{service}` must be a catalog service.
+#   manual - an operator performs the step outside Sentinel and records the outcome.
+actions:
+  disable_fault_flag:
+    description: >-
+      Turn off the faulty feature flag (fault injection) on the service. Fastest, fully
+      reversible mitigation when a bad flag or config push caused errors/latency.
+    executor: http
+    method: POST
+    url: "http://{service}:8080/admin/faults/clear"
+    risk: low
+    requires_approval: true
+    signals: [error_rate, latency_p95]
+  rollback_deployment:
+    description: Roll the service back to the previous known-good release.
+    executor: manual
+    risk: medium
+    requires_approval: true
+    signals: [error_rate, latency_p95]
+  restart_service:
+    description: Rolling restart of the service's pods/containers.
+    executor: manual
+    risk: medium
+    requires_approval: true
+    signals: [error_rate, latency_p95, request_rate]
+  scale_out:
+    description: Increase replicas to absorb load or isolate saturated instances.
+    executor: manual
+    risk: low
+    requires_approval: true
+    signals: [latency_p95, request_rate]
+  failover_dependency:
+    description: Route traffic to a secondary provider / region for the failing dependency.
+    executor: manual
+    risk: high
+    requires_approval: true
+    signals: [error_rate]

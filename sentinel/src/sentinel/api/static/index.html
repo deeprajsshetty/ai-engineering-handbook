@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Sentinel Console</title>
+<style>
+  :root { --bg:#f6f7f9; --panel:#fff; --ink:#1b1f24; --muted:#5b6470; --line:#dde1e6;
+          --crit:#c62828; --warn:#b26a00; --ok:#2e7d32; --accent:#1f5fbf; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --panel:#1a1e24; --ink:#e6e9ee; --muted:#9aa4b1; --line:#2b313a;
+            --crit:#ef5350; --warn:#ffb74d; --ok:#66bb6a; --accent:#6ea8ff; }
+  }
+  * { box-sizing: border-box; }
+  body { margin:0; font:14px/1.45 system-ui, -apple-system, Segoe UI, sans-serif;
+         background:var(--bg); color:var(--ink); }
+  header { display:flex; gap:12px; align-items:center; padding:12px 16px;
+           border-bottom:1px solid var(--line); background:var(--panel); flex-wrap:wrap; }
+  header h1 { font-size:16px; margin:0 12px 0 0; }
+  input, button, select { font:inherit; padding:6px 10px; border:1px solid var(--line);
+           border-radius:6px; background:var(--panel); color:var(--ink); }
+  button { cursor:pointer; } button.primary { background:var(--accent); color:#fff; border:0; }
+  button.danger { color:var(--crit); }
+  main { display:grid; grid-template-columns: minmax(280px, 380px) 1fr; gap:16px; padding:16px; }
+  @media (max-width: 800px) { main { grid-template-columns: 1fr; } }
+  .panel { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:12px;
+           min-width:0; }
+  .stats { display:flex; gap:16px; flex-wrap:wrap; margin-left:auto; color:var(--muted); }
+  .stats b { color:var(--ink); }
+  ul.incidents { list-style:none; margin:0; padding:0; }
+  ul.incidents li { padding:8px; border-radius:6px; cursor:pointer; border:1px solid transparent; }
+  ul.incidents li:hover, ul.incidents li.sel { border-color:var(--line); background:var(--bg); }
+  .sev-critical { color:var(--crit); font-weight:600; } .sev-warning { color:var(--warn); font-weight:600; }
+  .muted { color:var(--muted); } .tag { display:inline-block; padding:1px 6px; border-radius:10px;
+           border:1px solid var(--line); font-size:12px; margin-right:4px; }
+  table { border-collapse:collapse; width:100%; font-size:13px; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); vertical-align:top; }
+  pre { white-space:pre-wrap; word-break:break-word; background:var(--bg); padding:10px;
+        border-radius:6px; max-height:420px; overflow:auto; font-size:12px; }
+  h2 { font-size:15px; margin:4px 0 8px; } h3 { font-size:14px; margin:16px 0 6px; }
+  .err { color:var(--crit); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Sentinel AIOps</h1>
+  <input id="key" type="password" placeholder="API key" autocomplete="off" size="28">
+  <button id="save" class="primary">Connect</button>
+  <span id="who" class="muted"></span>
+  <div class="stats" id="stats"></div>
+</header>
+<main>
+  <section class="panel">
+    <h2>Incidents</h2>
+    <select id="filter"><option value="active">Active</option><option value="">All</option>
+      <option value="resolved">Resolved</option></select>
+    <ul class="incidents" id="list"><li class="muted">Connect with an API key.</li></ul>
+  </section>
+  <section class="panel" id="detail"><p class="muted">Select an incident.</p></section>
+</main>
+<script src="/static/console.js"></script>
+</body>
+</html>
