@@ -9,6 +9,8 @@ platform/web/node_modules/
 
 # Local secret files for development. Never commit secrets.
 secrets/
+# ...but the Go package that *resolves* secret references is source code, not secrets.
+!platform/internal/secrets/
 .env
 .env.*
 !.env.example
