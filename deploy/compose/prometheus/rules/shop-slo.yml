@@ -1,0 +1,38 @@
+# Golden-signal alerts for the shop services. `for` is short so the demo reacts in ~1 minute;
+# production values are typically 2-5m with multi-window burn-rate alerts (see docs/runbooks).
+groups:
+  - name: shop-golden-signals
+    rules:
+      - record: shop:request_rate:1m
+        expr: sum by (service) (rate(shop_server_requests_total[1m]))
+      - record: shop:error_ratio:1m
+        expr: |
+          (sum by (service) (rate(shop_server_requests_total{status_class="5xx"}[1m])) or (shop:request_rate:1m * 0))
+          / clamp_min(shop:request_rate:1m, 0.001)
+      - record: shop:latency_p95:1m
+        expr: histogram_quantile(0.95, sum by (service, le) (rate(shop_server_duration_seconds_bucket[1m])))
+
+      - alert: HighErrorRate
+        expr: shop:error_ratio:1m > 0.05
+        for: 30s
+        labels:
+          severity: critical
+        annotations:
+          summary: "{{ $labels.service }} error rate {{ $value | humanizePercentage }}"
+          description: "More than 5% of {{ $labels.service }} requests are failing with 5xx."
+          runbook_url: "https://github.com/deeprajsshetty/ai-engineering-handbook/blob/master/sentinel/src/sentinel/knowledge/runbooks/high-error-rate.md"
+      - alert: HighLatencyP95
+        expr: shop:latency_p95:1m > 0.5
+        for: 30s
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} p95 latency {{ $value | humanizeDuration }}"
+          description: "p95 latency of {{ $labels.service }} is above 500ms."
+      - alert: TrafficDrop
+        expr: shop:request_rate:1m < 0.2 and shop:request_rate:1m offset 10m > 1
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "{{ $labels.service }} traffic dropped sharply"

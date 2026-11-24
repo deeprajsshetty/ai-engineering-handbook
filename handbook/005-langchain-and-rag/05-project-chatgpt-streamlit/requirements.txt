@@ -1,0 +1,8 @@
+openai==2.26.0
+langchain==1.2.12
+langchain-openai==1.1.11
+langchain-core==1.2.18
+# streamlit-chat removed: replaced by streamlit's built-in st.chat_message() (requires streamlit>=1.23)
+streamlit>=1.23.0
+tiktoken==0.12.0
+python-dotenv==1.2.2

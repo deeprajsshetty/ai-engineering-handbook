@@ -1,0 +1,35 @@
+# Render Blueprint for the FastAPI + MCP ToDo app.
+# Docs: https://render.com/docs/blueprint-spec
+#
+# Deploy: push this repo to GitHub, then in Render choose
+# New > Blueprint and select the repo.
+
+services:
+  - type: web
+    name: fastapi-mcp-todo
+    runtime: python
+    plan: free
+    # The app lives in a subfolder of this repo
+    rootDir: handbook/001-fastapi-mcp-todo
+    buildCommand: pip install -r requirements.txt
+    # Render provides $PORT; bind to all interfaces
+    startCommand: uvicorn main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.13.11
+      - key: TODO_DB_PATH
+        value: /tmp/todos.db
+
+    # NOTE: On the free plan the filesystem is temporary, so todos are lost
+    # on every deploy, restart, or idle spin-down. To keep data, switch to a
+    # paid plan and attach a persistent disk:
+    #
+    # plan: starter
+    # disk:
+    #   name: todo-data
+    #   mountPath: /var/data
+    #   sizeGB: 1
+    #
+    # ...and change TODO_DB_PATH above to /var/data/todos.db

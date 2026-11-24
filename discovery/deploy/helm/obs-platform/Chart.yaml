@@ -1,0 +1,7 @@
+apiVersion: v2
+name: obs-platform
+description: Observability platform MVP — discovery, topology and topology-driven metrics. One chart for public- and private-cloud Kubernetes.
+type: application
+version: 0.1.0
+appVersion: "0.1.0-mvp"
+kubeVersion: ">=1.27.0-0"

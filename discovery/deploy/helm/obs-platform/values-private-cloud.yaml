@@ -1,0 +1,20 @@
+# Example overlay for a private / on-premises Kubernetes distribution
+# (OpenShift, RKE2, upstream). Same image and templates as public cloud.
+image:
+  repository: harbor.corp.internal/platform/obsplatform   # mirrored from the release registry
+  digest: ""
+api:
+  replicas: 2
+ingress:
+  enabled: true                       # fallback where Gateway API is not installed
+  className: nginx-gateway-fabric     # or openshift-default, traefik, ...
+  hosts: [obs.corp.internal]
+  tls:
+    - { secretName: obs-tls, hosts: [obs.corp.internal] }   # issued by cert-manager with the corporate CA
+env:
+  OBS_EGRESS_ALLOWLIST: "k8s-api.corp.internal,10.20.0.5"
+database:
+  existingSecret: obsplatform-db      # CloudNativePG-generated or DBA-provided; synced from OpenBao by External Secrets Operator
+networkPolicy:
+  ingressFromNamespaces: [ingress-system]
+  providerEgressCIDRs: ["10.20.0.0/24"]

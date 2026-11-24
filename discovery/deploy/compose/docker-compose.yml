@@ -1,0 +1,49 @@
+# Local containers: PostgreSQL plus the platform image.
+#   docker compose -f deploy/compose/docker-compose.yml up --build
+# Then open http://localhost:8080 and sign in with the dev token "dev-admin".
+# Development settings only (dev auth, trust-free local password below).
+name: obsplatform
+services:
+  postgres:
+    image: postgres:18.3-alpine
+    environment:
+      POSTGRES_USER: obs
+      POSTGRES_DB: obsplatform
+      # Local-only password for the throwaway container database.
+      POSTGRES_PASSWORD: obs-local-dev
+    ports: ["127.0.0.1:5432:5432"]
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U obs -d obsplatform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    build: { context: ../.., dockerfile: deploy/docker/Dockerfile }
+    image: obsplatform:local
+    command: ["migrate", "up"]
+    environment: &env
+      OBS_DATABASE_URL: postgres://obs:obs-local-dev@postgres:5432/obsplatform?sslmode=disable
+      OBS_ENV: development
+      OBS_AUTH_MODE: dev
+    depends_on: { postgres: { condition: service_healthy } }
+
+  seed:
+    image: obsplatform:local
+    command: ["seed"]
+    environment: *env
+    depends_on: { migrate: { condition: service_completed_successfully } }
+
+  app:
+    image: obsplatform:local
+    command: ["serve"]
+    environment: *env
+    ports: ["127.0.0.1:8080:8080"]
+    depends_on: { seed: { condition: service_completed_successfully } }
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: ["ALL"]
+
+volumes:
+  pgdata: {}

@@ -1,0 +1,16 @@
+version: 2
+updates:
+  - package-ecosystem: uv
+    directory: /sentinel
+    schedule: {interval: weekly}
+    groups:
+      otel: {patterns: ["opentelemetry-*"]}
+  - package-ecosystem: pip
+    directory: /demo-services/shop
+    schedule: {interval: weekly}
+  - package-ecosystem: docker
+    directories: [/sentinel, /demo-services/shop]
+    schedule: {interval: weekly}
+  - package-ecosystem: github-actions
+    directory: /
+    schedule: {interval: weekly}

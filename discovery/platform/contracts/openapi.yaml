@@ -1,0 +1,803 @@
+openapi: 3.1.0
+info:
+  title: Observability Platform API
+  version: 1.0.0-mvp
+  summary: Discovery, topology and topology-driven metrics.
+  description: |
+    Versioned HTTP API of the observability platform MVP.
+
+    **Authentication.** Every `/api/v1` operation except `openapi.yaml` requires
+    `Authorization: Bearer <token>`. In this MVP the only authenticator is the
+    local-development mode (static tokens, refused when `OBS_ENV=production`).
+    The production OIDC seam is documented in ADR 0006 and not implemented.
+
+    **Tenancy.** The tenant comes from the credential, never from the request.
+    Every read and write is scoped to it; objects of other tenants are `404`.
+
+    **Errors.** Failures use RFC 9457 `application/problem+json` with a stable
+    `code`, the `requestId` (also in the `X-Request-ID` header) and, for
+    validation failures, per-field `errors`.
+
+    **Pagination.** List operations use opaque keyset cursors: pass
+    `nextCursor` from a response as `cursor` on the next request. `limit`
+    defaults to 50, maximum 500.
+
+    **Compatibility.** Within `/api/v1` changes are additive only (new
+    fields, new optional parameters, new operations). Clients must ignore
+    unknown fields. A breaking change requires `/api/v2`.
+
+    **Simulated data.** Resources from the `fixture` provider and samples with
+    `source: simulated` are generated locally and are not measurements.
+servers:
+  - url: http://localhost:8080
+    description: Local development
+security:
+  - bearerAuth: []
+tags:
+  - name: system
+  - name: connections
+  - name: discovery
+  - name: topology
+  - name: metrics
+  - name: audit
+
+paths:
+  /healthz:
+    get:
+      tags: [system]
+      summary: Liveness probe (process is up).
+      security: []
+      responses:
+        "200": { description: Alive, content: { application/json: { schema: { $ref: "#/components/schemas/Health" } } } }
+  /readyz:
+    get:
+      tags: [system]
+      summary: Readiness probe (database reachable, migrations applied, not shutting down).
+      security: []
+      responses:
+        "200": { description: Ready, content: { application/json: { schema: { $ref: "#/components/schemas/Ready" } } } }
+        "503": { description: Not ready, content: { application/json: { schema: { $ref: "#/components/schemas/Ready" } } } }
+  /metrics:
+    get:
+      tags: [system]
+      summary: Prometheus text exposition of the platform's own operational metrics.
+      description: Not authenticated; restrict with network policy in production.
+      security: []
+      responses:
+        "200": { description: Metrics, content: { text/plain: { schema: { type: string } } } }
+  /api/v1/openapi.yaml:
+    get:
+      tags: [system]
+      summary: This document.
+      security: []
+      responses:
+        "200": { description: OpenAPI document, content: { application/yaml: { schema: { type: string } } } }
+  /api/v1/catalog:
+    get:
+      tags: [catalog]
+      summary: Domains, resource types, metric definitions, relationship types and installed modules.
+      description: Drives generic rendering in the UI; installing a module changes this response, not client code.
+      x-permission: authenticated
+      responses:
+        "200": { description: Catalog, content: { application/json: { schema: { $ref: "#/components/schemas/Catalog" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/fleet:
+    get:
+      tags: [metrics]
+      summary: Resources of one type or domain with the latest value of selected metrics.
+      x-permission: metrics:read
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: type, in: query, schema: { type: string, example: database.instance } }
+        - { $ref: "#/components/parameters/Domain" }
+        - { name: metrics, in: query, description: "Comma-separated metric names (max 12). Default: all metrics of the type, or each type's key metric for a domain.", schema: { type: string } }
+        - { name: q, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: label, in: query, description: "key=value", schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: provider, in: query, schema: { type: string } }
+        - { name: connectionId, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Fleet, content: { application/json: { schema: { $ref: "#/components/schemas/Fleet" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/me:
+    get:
+      tags: [system]
+      summary: The authenticated principal, its tenant and permissions.
+      x-permission: authenticated
+      responses:
+        "200":
+          description: Principal
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/Me" }
+              example: { subject: demo-admin, tenantId: demo, role: admin, permissions: [audit:read, connections:read], authMode: dev, environment: development, version: dev }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+
+  /api/v1/providers:
+    get:
+      tags: [connections]
+      summary: Enabled discovery providers and their configuration fields.
+      x-permission: connections:read
+      responses:
+        "200": { description: Providers, content: { application/json: { schema: { $ref: "#/components/schemas/ProviderList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+  /api/v1/connections:
+    get:
+      tags: [connections]
+      summary: List connection profiles (secret-safe).
+      x-permission: connections:read
+      parameters: [{ $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }]
+      responses:
+        "200": { description: Connections, content: { application/json: { schema: { $ref: "#/components/schemas/ConnectionList" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [connections]
+      summary: Create a connection profile.
+      description: |
+        `config` holds non-secret settings only; keys that look like secrets
+        are rejected. Credentials are referenced with `credentialRef`
+        (`env:OBS_SECRET_<NAME>` or `file:<name>` under `OBS_SECRET_DIR`); the
+        value is never stored or returned.
+      x-permission: connections:write
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/CreateConnection" }
+            examples:
+              fixture: { value: { name: Demo estate (simulated), provider: fixture, config: { scenario: retail-demo, pageSize: 10 } } }
+              kubernetes: { value: { name: prod-cluster, provider: kubernetes, config: { server: "https://k8s.example.internal:6443", clusterName: prod }, credentialRef: "env:OBS_SECRET_PROD_K8S_TOKEN" } }
+      responses:
+        "201":
+          description: Created
+          headers: { Location: { schema: { type: string } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Connection" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "413": { $ref: "#/components/responses/BadRequest" }
+  /api/v1/connections/{id}:
+    get:
+      tags: [connections]
+      summary: Get a connection profile with its latest discovery job.
+      x-permission: connections:read
+      parameters: [{ $ref: "#/components/parameters/ConnectionId" }]
+      responses:
+        "200": { description: Connection, content: { application/json: { schema: { $ref: "#/components/schemas/Connection" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/connections/{id}/validate:
+    post:
+      tags: [connections]
+      summary: Validate configuration and run the provider's read-only connectivity check.
+      x-permission: connections:write
+      parameters: [{ $ref: "#/components/parameters/ConnectionId" }]
+      responses:
+        "200": { description: Validation result, content: { application/json: { schema: { $ref: "#/components/schemas/ValidationResult" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/connections/{id}/discovery-jobs:
+    post:
+      tags: [discovery]
+      summary: Start a discovery job for the connection.
+      description: |
+        Queues a job. At most one job per connection may be queued or running;
+        a second request returns `409` with `extra.activeJobId`. With an
+        `Idempotency-Key`, a retried request returns the original job (`200`).
+      x-permission: discovery:run
+      parameters:
+        - { $ref: "#/components/parameters/ConnectionId" }
+        - { name: Idempotency-Key, in: header, required: false, schema: { type: string, pattern: "^[A-Za-z0-9_.:-]{1,128}$" } }
+      responses:
+        "202":
+          description: Queued
+          headers: { Location: { schema: { type: string } } }
+          content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } }
+        "200": { description: Idempotent replay of an earlier request, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/connections/{id}/metric-collections:
+    post:
+      tags: [metrics]
+      summary: Trigger metric collection for the connection's active resources.
+      x-permission: metrics:collect
+      parameters: [{ $ref: "#/components/parameters/ConnectionId" }]
+      responses:
+        "202": { description: Started, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionRun" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+        "422": { $ref: "#/components/responses/Unprocessable" }
+  /api/v1/discovery-jobs:
+    get:
+      tags: [discovery]
+      summary: List discovery jobs, newest first.
+      x-permission: discovery:read
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: connectionId, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/JobStatus" } }
+      responses:
+        "200": { description: Jobs, content: { application/json: { schema: { $ref: "#/components/schemas/JobList" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/discovery-jobs/{id}:
+    get:
+      tags: [discovery]
+      summary: Get a job with progress and reconciliation counts.
+      x-permission: discovery:read
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "200": { description: Job, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/discovery-jobs/{id}/cancel:
+    post:
+      tags: [discovery]
+      summary: Cancel a queued (immediately) or running (cooperatively) job.
+      x-permission: discovery:run
+      parameters: [{ $ref: "#/components/parameters/JobId" }]
+      responses:
+        "202": { description: Cancellation accepted, content: { application/json: { schema: { $ref: "#/components/schemas/Job" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+        "409": { $ref: "#/components/responses/Conflict" }
+  /api/v1/discovery-jobs/{id}/events:
+    get:
+      tags: [discovery]
+      summary: Bounded progress log of a job.
+      x-permission: discovery:read
+      parameters:
+        - { $ref: "#/components/parameters/JobId" }
+        - { name: afterSeq, in: query, schema: { type: integer, minimum: 0 } }
+      responses:
+        "200": { description: Events, content: { application/json: { schema: { $ref: "#/components/schemas/JobEventList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/resources:
+    get:
+      tags: [topology]
+      summary: Search and filter resources (nodes), ordered by name.
+      x-permission: topology:read
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: q, in: query, description: Case-insensitive substring of name or external ID., schema: { type: string, maxLength: 128 } }
+        - { name: type, in: query, schema: { type: string, example: compute.instance } }
+        - { name: provider, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: connectionId, in: query, schema: { type: string } }
+        - { name: label, in: query, description: "key=value", schema: { type: string } }
+        - { $ref: "#/components/parameters/Domain" }
+      responses:
+        "200": { description: Resources, content: { application/json: { schema: { $ref: "#/components/schemas/ResourceList" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/resources/facets:
+    get:
+      tags: [topology]
+      summary: Faceted counts (domain, type, provider, region, status, engine, env) for the resource explorer.
+      description: Accepts the same filters as /api/v1/resources. Each facet is counted with every filter except its own.
+      x-permission: topology:read
+      parameters:
+        - { name: q, in: query, schema: { type: string, maxLength: 128 } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: provider, in: query, schema: { type: string } }
+        - { name: region, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: connectionId, in: query, schema: { type: string } }
+        - { name: label, in: query, description: "key=value", schema: { type: string } }
+        - { $ref: "#/components/parameters/Domain" }
+      responses:
+        "200": { description: Facets, content: { application/json: { schema: { $ref: "#/components/schemas/Facets" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/resources/{id}:
+    get:
+      tags: [topology]
+      summary: Resource detail with freshness and metric capabilities.
+      x-permission: topology:read
+      parameters: [{ $ref: "#/components/parameters/ResourceId" }]
+      responses:
+        "200": { description: Resource, content: { application/json: { schema: { $ref: "#/components/schemas/Resource" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/resources/{id}/neighborhood:
+    get:
+      tags: [topology]
+      summary: Bounded breadth-first neighbourhood of a resource.
+      x-permission: topology:read
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { name: depth, in: query, schema: { type: integer, minimum: 1, maximum: 4, default: 1 } }
+        - { name: direction, in: query, schema: { type: string, enum: [in, out, both], default: both } }
+        - { name: maxNodes, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 100 } }
+        - { name: includeMissing, in: query, schema: { type: boolean, default: false } }
+      responses:
+        "200": { description: Subgraph, content: { application/json: { schema: { $ref: "#/components/schemas/Subgraph" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/resources/{id}/metrics:
+    get:
+      tags: [metrics]
+      summary: Metric capabilities of the resource with the latest sample of each.
+      x-permission: metrics:read
+      parameters: [{ $ref: "#/components/parameters/ResourceId" }]
+      responses:
+        "200": { description: Metrics, content: { application/json: { schema: { $ref: "#/components/schemas/ResourceMetricList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/resources/{id}/metrics/{metric}:
+    get:
+      tags: [metrics]
+      summary: Time series of one metric, bucketed by step (avg/min/max/count).
+      description: Defaults to the last hour. At most 1500 points and 7 days per request.
+      x-permission: metrics:read
+      parameters:
+        - { $ref: "#/components/parameters/ResourceId" }
+        - { name: metric, in: path, required: true, schema: { type: string, example: cpu.utilization } }
+        - { name: from, in: query, schema: { type: string, format: date-time } }
+        - { name: to, in: query, schema: { type: string, format: date-time } }
+        - { name: step, in: query, description: "Go duration, e.g. 60s, 5m", schema: { type: string } }
+      responses:
+        "200": { description: Series, content: { application/json: { schema: { $ref: "#/components/schemas/Series" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/relationships:
+    get:
+      tags: [topology]
+      summary: List relationships (directed edges) with endpoint names.
+      x-permission: topology:read
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: type, in: query, schema: { $ref: "#/components/schemas/RelationType" } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: resourceId, in: query, description: Either endpoint., schema: { type: string } }
+        - { name: connectionId, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Relationships, content: { application/json: { schema: { $ref: "#/components/schemas/RelationshipList" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/relationship-types:
+    get:
+      tags: [topology]
+      summary: Relationship types and whether cycles are permitted.
+      x-permission: topology:read
+      responses:
+        "200": { description: Types, content: { application/json: { schema: { $ref: "#/components/schemas/RelationSpecList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/topology/summary:
+    get:
+      tags: [topology]
+      summary: Counts by type, provider, region and relationship type.
+      x-permission: topology:read
+      parameters: [{ name: connectionId, in: query, schema: { type: string } }]
+      responses:
+        "200": { description: Summary, content: { application/json: { schema: { $ref: "#/components/schemas/Summary" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/topology/graph:
+    get:
+      tags: [topology]
+      summary: Bounded node and edge set for visualization, with cycle diagnostics.
+      x-permission: topology:read
+      parameters:
+        - { name: connectionId, in: query, schema: { type: string } }
+        - { name: type, in: query, schema: { type: string } }
+        - { name: q, in: query, schema: { type: string } }
+        - { name: status, in: query, schema: { $ref: "#/components/schemas/Status" } }
+        - { name: includeMissing, in: query, schema: { type: boolean, default: false } }
+        - { name: maxNodes, in: query, schema: { type: integer, minimum: 1, maximum: 1000, default: 300 } }
+      responses:
+        "200": { description: Graph, content: { application/json: { schema: { $ref: "#/components/schemas/Graph" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/topology/changes:
+    get:
+      tags: [topology]
+      summary: Reconciliation change log (added, changed, reactivated, missing), newest first.
+      x-permission: topology:read
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: jobId, in: query, schema: { type: string } }
+        - { name: resourceId, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Changes, content: { application/json: { schema: { $ref: "#/components/schemas/ChangeList" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/metric-definitions:
+    get:
+      tags: [metrics]
+      summary: Metric catalogue with units and the resource types each applies to.
+      x-permission: metrics:read
+      responses:
+        "200": { description: Definitions, content: { application/json: { schema: { $ref: "#/components/schemas/MetricDefinitionList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/metric-collections:
+    get:
+      tags: [metrics]
+      summary: List metric collection runs, newest first.
+      x-permission: metrics:read
+      parameters:
+        - { $ref: "#/components/parameters/Limit" }
+        - { $ref: "#/components/parameters/Cursor" }
+        - { name: connectionId, in: query, schema: { type: string } }
+      responses:
+        "200": { description: Runs, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionRunList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+  /api/v1/metric-collections/{id}:
+    get:
+      tags: [metrics]
+      summary: Get a collection run.
+      x-permission: metrics:read
+      parameters: [{ name: id, in: path, required: true, schema: { type: string, pattern: "^col_[0-9a-f]{28}$" } }]
+      responses:
+        "200": { description: Run, content: { application/json: { schema: { $ref: "#/components/schemas/CollectionRun" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "404": { $ref: "#/components/responses/NotFound" }
+  /api/v1/audit-events:
+    get:
+      tags: [audit]
+      summary: Security-relevant actions of the tenant, newest first.
+      x-permission: audit:read
+      parameters: [{ $ref: "#/components/parameters/Limit" }, { $ref: "#/components/parameters/Cursor" }]
+      responses:
+        "200": { description: Events, content: { application/json: { schema: { $ref: "#/components/schemas/AuditList" } } } }
+        "401": { $ref: "#/components/responses/Unauthenticated" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+components:
+  securitySchemes:
+    bearerAuth: { type: http, scheme: bearer }
+  parameters:
+    Limit: { name: limit, in: query, schema: { type: integer, minimum: 1, maximum: 500, default: 50 } }
+    Cursor: { name: cursor, in: query, description: Opaque value of nextCursor from the previous page., schema: { type: string, maxLength: 1024 } }
+    Domain: { name: domain, in: query, description: "Catalog domain (compute, containers, database, network, storage, serverless); expands to its resource types.", schema: { type: string } }
+    ConnectionId: { name: id, in: path, required: true, schema: { type: string, pattern: "^con_[0-9a-f]{28}$" } }
+    JobId: { name: id, in: path, required: true, schema: { type: string, pattern: "^job_[0-9a-f]{28}$" } }
+    ResourceId: { name: id, in: path, required: true, schema: { type: string, pattern: "^res_[0-9a-f]{24}$" } }
+  responses:
+    BadRequest: { description: Validation failed, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Unauthenticated: { description: Missing or invalid credentials, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Forbidden: { description: Missing permission, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    NotFound: { description: Not found in this tenant, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Conflict: { description: Conflicts with current state, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+    Unprocessable: { description: Valid request that cannot be performed, content: { application/problem+json: { schema: { $ref: "#/components/schemas/Problem" } } } }
+  schemas:
+    Problem:
+      type: object
+      required: [type, title, status, code, requestId]
+      properties:
+        type: { type: string, example: "urn:obsplatform:problem:validation_failed" }
+        title: { type: string }
+        status: { type: integer }
+        detail: { type: string }
+        code: { type: string, example: validation_failed }
+        requestId: { type: string }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+        extra: { type: object, additionalProperties: true }
+      example: { type: "urn:obsplatform:problem:validation_failed", title: Bad Request, status: 400, code: validation_failed, requestId: req_0193a1b2c3d4e5f60718293a4b, errors: [{ field: name, message: "must be 1-64 characters" }] }
+    FieldError: { type: object, required: [field, message], properties: { field: { type: string }, message: { type: string } } }
+    Health: { type: object, properties: { status: { type: string }, version: { type: string }, commit: { type: string } } }
+    Ready: { type: object, properties: { status: { type: string }, reason: { type: string } } }
+    Me:
+      type: object
+      properties:
+        subject: { type: string }
+        tenantId: { type: string }
+        role: { type: string, enum: [viewer, operator, admin] }
+        permissions: { type: array, items: { type: string } }
+        authMode: { type: string }
+        environment: { type: string }
+        version: { type: string }
+    Status: { type: string, enum: [active, missing] }
+    JobStatus: { type: string, enum: [queued, running, succeeded, failed, cancelled] }
+    RelationType: { type: string, enum: [contains, composed_of, member_of, uses, depends_on, routes_to, connects_to] }
+    ConfigField:
+      type: object
+      properties:
+        name: { type: string }
+        type: { type: string, enum: [string, integer, boolean, stringList] }
+        required: { type: boolean }
+        default: {}
+        description: { type: string }
+        placeholder: { type: string }
+        options:
+          type: array
+          description: Closed set of allowed values (rendered as a select).
+          items: { type: object, properties: { value: { type: string }, label: { type: string }, description: { type: string } } }
+    Domain:
+      type: object
+      properties: { name: { type: string }, displayName: { type: string }, description: { type: string }, order: { type: integer } }
+    ResourceType:
+      type: object
+      properties:
+        type: { type: string }
+        domain: { type: string }
+        displayName: { type: string }
+        description: { type: string }
+        icon: { type: string }
+        keyMetric: { type: string }
+        keyProperties: { type: array, items: { type: string } }
+    Catalog:
+      type: object
+      properties:
+        domains: { type: array, items: { $ref: "#/components/schemas/Domain" } }
+        resourceTypes: { type: array, items: { $ref: "#/components/schemas/ResourceType" } }
+        metricDefinitions: { type: array, items: { type: object } }
+        relationshipTypes: { type: array, items: { type: object } }
+        modules:
+          type: array
+          items: { type: object, properties: { name: { type: string }, description: { type: string }, providers: { type: array, items: { type: string } } } }
+    Facets:
+      type: object
+      properties:
+        facets:
+          type: object
+          additionalProperties: { type: array, items: { type: object, properties: { value: { type: string }, count: { type: integer } } } }
+    Fleet:
+      type: object
+      properties:
+        metrics: { type: array, items: { type: object } }
+        items:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/Resource" }
+              - { type: object, properties: { latest: { type: object, additionalProperties: { type: object } } } }
+        nextCursor: { type: string }
+    Provider:
+      type: object
+      properties:
+        name: { type: string }
+        displayName: { type: string }
+        description: { type: string }
+        simulated: { type: boolean }
+        requiresCredential: { type: boolean }
+        metricsSource: { type: string, enum: [simulated, measured, none] }
+        configFields: { type: array, items: { $ref: "#/components/schemas/ConfigField" } }
+        resourceTypes: { type: array, items: { type: string } }
+    ProviderList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Provider" } } } }
+    CreateConnection:
+      type: object
+      required: [name, provider]
+      additionalProperties: false
+      properties:
+        name: { type: string, pattern: "^[A-Za-z0-9][A-Za-z0-9 ._-]{0,63}$" }
+        provider: { type: string, enum: [fixture, kubernetes] }
+        config: { type: object, additionalProperties: true }
+        credentialRef: { type: string, description: "env:OBS_SECRET_<NAME> or file:<name>", example: "env:OBS_SECRET_PROD_K8S_TOKEN" }
+        discoveryIntervalMinutes: { type: integer, minimum: 0, maximum: 10080, description: "0 = manual only; otherwise at least 5" }
+    Connection:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        name: { type: string }
+        provider: { type: string }
+        config: { type: object, additionalProperties: true }
+        discoveryIntervalMinutes: { type: integer }
+        createdBy: { type: string }
+        createdAt: { type: string, format: date-time }
+        updatedAt: { type: string, format: date-time }
+        credential: { type: object, properties: { configured: { type: boolean }, ref: { type: string } } }
+        simulated: { type: boolean }
+        metricsSource: { type: string }
+        lastJob: { $ref: "#/components/schemas/Job" }
+    ConnectionList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Connection" } }, nextCursor: { type: string } } }
+    ValidationResult:
+      type: object
+      properties:
+        valid: { type: boolean }
+        errors: { type: array, items: { $ref: "#/components/schemas/FieldError" } }
+        check: { type: object, properties: { performed: { type: boolean }, ok: { type: boolean }, message: { type: string } } }
+    Counts:
+      type: object
+      properties:
+        added: { type: integer }
+        changed: { type: integer }
+        unchanged: { type: integer }
+        reactivated: { type: integer }
+        missing: { type: integer }
+        edgesAdded: { type: integer }
+        edgesUnchanged: { type: integer }
+        edgesReactivated: { type: integer }
+        edgesMissing: { type: integer }
+    Job:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        connectionId: { type: string }
+        status: { $ref: "#/components/schemas/JobStatus" }
+        trigger: { type: string, enum: [manual, schedule] }
+        requestedBy: { type: string }
+        requestId: { type: string }
+        attempt: { type: integer }
+        cancelRequested: { type: boolean }
+        progress:
+          type: object
+          properties: { phase: { type: string }, pages: { type: integer }, resources: { type: integer }, relationships: { type: integer }, warnings: { type: integer } }
+        counts: { $ref: "#/components/schemas/Counts" }
+        complete: { type: boolean, description: True only when the provider finished listing; only complete runs mark resources missing. }
+        error: { type: string }
+        createdAt: { type: string, format: date-time }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+        heartbeatAt: { type: string, format: date-time }
+    JobList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Job" } }, nextCursor: { type: string } } }
+    JobEvent:
+      type: object
+      properties: { seq: { type: integer }, at: { type: string, format: date-time }, level: { type: string, enum: [info, warn, error] }, message: { type: string }, details: { type: object } }
+    JobEventList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/JobEvent" } } } }
+    Resource:
+      type: object
+      properties:
+        id: { type: string, description: Deterministic hash of tenant + natural key. }
+        tenantId: { type: string }
+        connectionId: { type: string, description: Connection that last observed the resource. }
+        provider: { type: string }
+        scope: { type: string, description: Account, project, subscription or cluster. }
+        externalId: { type: string, description: Provider's stable identifier. }
+        domain: { type: string, description: Catalog domain of the type. }
+        type: { type: string, example: compute.instance }
+        nativeType: { type: string }
+        name: { type: string }
+        region: { type: string }
+        labels: { type: object, additionalProperties: { type: string } }
+        properties: { type: object, additionalProperties: true }
+        status: { $ref: "#/components/schemas/Status" }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        missingSince: { type: string, format: date-time }
+        lastJobId: { type: string }
+        freshness: { type: string, enum: [fresh, aging, stale] }
+        ageSeconds: { type: integer }
+        metricCapabilities: { type: array, items: { type: string } }
+    ResourceList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Resource" } }, nextCursor: { type: string } } }
+    Edge:
+      type: object
+      properties: { id: { type: string }, sourceId: { type: string }, targetId: { type: string }, type: { $ref: "#/components/schemas/RelationType" } }
+    Relationship:
+      type: object
+      properties:
+        id: { type: string }
+        sourceId: { type: string }
+        targetId: { type: string }
+        type: { $ref: "#/components/schemas/RelationType" }
+        status: { $ref: "#/components/schemas/Status" }
+        sourceName: { type: string }
+        sourceType: { type: string }
+        targetName: { type: string }
+        targetType: { type: string }
+        firstSeenAt: { type: string, format: date-time }
+        lastSeenAt: { type: string, format: date-time }
+        missingSince: { type: string, format: date-time }
+    RelationshipList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Relationship" } }, nextCursor: { type: string } } }
+    RelationSpecList:
+      type: object
+      properties: { items: { type: array, items: { type: object, properties: { type: { $ref: "#/components/schemas/RelationType" }, acyclic: { type: boolean }, description: { type: string } } } } }
+    Subgraph:
+      type: object
+      properties:
+        rootId: { type: string }
+        depth: { type: integer }
+        direction: { type: string }
+        nodes: { type: array, items: { $ref: "#/components/schemas/Resource" } }
+        edges: { type: array, items: { $ref: "#/components/schemas/Edge" } }
+        truncated: { type: boolean }
+    Graph:
+      type: object
+      properties:
+        nodes: { type: array, items: { $ref: "#/components/schemas/Resource" } }
+        edges: { type: array, items: { $ref: "#/components/schemas/Edge" } }
+        truncated: { type: boolean }
+        cycleBackEdges: { type: object, properties: { acyclicTypes: { type: integer }, dependencyTypes: { type: integer } } }
+    CountBy: { type: object, properties: { key: { type: string }, count: { type: integer } } }
+    Summary:
+      type: object
+      properties:
+        resources: { type: integer }
+        activeResources: { type: integer }
+        missingResources: { type: integer }
+        relationships: { type: integer }
+        byType: { type: array, items: { $ref: "#/components/schemas/CountBy" } }
+        byProvider: { type: array, items: { $ref: "#/components/schemas/CountBy" } }
+        byRegion: { type: array, items: { $ref: "#/components/schemas/CountBy" } }
+        relationshipTypes: { type: array, items: { $ref: "#/components/schemas/CountBy" } }
+        lastSeenAt: { type: string, format: date-time }
+        oldestActiveSeenAt: { type: string, format: date-time }
+    Change:
+      type: object
+      properties: { id: { type: integer }, jobId: { type: string }, resourceId: { type: string }, name: { type: string }, type: { type: string }, kind: { type: string, enum: [added, changed, reactivated, missing] }, at: { type: string, format: date-time } }
+    ChangeList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/Change" } }, nextCursor: { type: string } } }
+    MetricDefinition:
+      type: object
+      properties:
+        name: { type: string, example: cpu.utilization }
+        unit: { type: string, description: "UCUM-style unit: %, By, By/s, ms, {request}/s, {core}" }
+        description: { type: string }
+        kind: { type: string, enum: [gauge] }
+        resourceTypes: { type: array, items: { type: string } }
+        min: { type: number }
+        max: { type: number, description: 0 means unbounded }
+    MetricDefinitionList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/MetricDefinition" } } } }
+    Sample:
+      type: object
+      properties:
+        resourceId: { type: string }
+        metric: { type: string }
+        ts: { type: string, format: date-time }
+        value: { type: number }
+        source: { type: string, enum: [simulated, measured] }
+        collector: { type: string }
+    ResourceMetricList:
+      type: object
+      properties:
+        items:
+          type: array
+          items:
+            allOf:
+              - { $ref: "#/components/schemas/MetricDefinition" }
+              - { type: object, properties: { latest: { $ref: "#/components/schemas/Sample" } } }
+    Series:
+      type: object
+      properties:
+        resourceId: { type: string }
+        metric: { type: string }
+        unit: { type: string }
+        description: { type: string }
+        from: { type: string, format: date-time }
+        to: { type: string, format: date-time }
+        stepSeconds: { type: integer }
+        sources: { type: array, items: { type: string, enum: [simulated, measured] } }
+        simulated: { type: boolean, description: True if any sample in range is simulated. }
+        points:
+          type: array
+          items:
+            type: object
+            properties: { ts: { type: string, format: date-time }, avg: { type: number }, min: { type: number }, max: { type: number }, count: { type: integer } }
+    CollectionRun:
+      type: object
+      properties:
+        id: { type: string }
+        tenantId: { type: string }
+        connectionId: { type: string }
+        trigger: { type: string, enum: [manual, schedule, discovery] }
+        status: { type: string, enum: [running, succeeded, failed] }
+        requestedBy: { type: string }
+        collector: { type: string }
+        resources: { type: integer }
+        samples: { type: integer, description: Newly stored samples (duplicates are ignored). }
+        error: { type: string }
+        startedAt: { type: string, format: date-time }
+        finishedAt: { type: string, format: date-time }
+    CollectionRunList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/CollectionRun" } }, nextCursor: { type: string } } }
+    AuditEvent:
+      type: object
+      properties: { id: { type: string }, tenantId: { type: string }, actor: { type: string }, action: { type: string }, targetType: { type: string }, targetId: { type: string }, requestId: { type: string }, at: { type: string, format: date-time }, details: { type: object } }
+    AuditList: { type: object, properties: { items: { type: array, items: { $ref: "#/components/schemas/AuditEvent" } }, nextCursor: { type: string } } }

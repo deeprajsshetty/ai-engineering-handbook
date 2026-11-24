@@ -1,0 +1,21 @@
+# Example overlay for a public-cloud managed Kubernetes cluster (EKS, AKS, GKE).
+# Only values change; the image and templates are identical to private cloud.
+image:
+  repository: <account>.dkr.ecr.<region>.amazonaws.com/obsplatform   # or ACR / Artifact Registry
+  digest: ""                                                          # set by the release pipeline
+api:
+  replicas: 3
+gateway:
+  enabled: true
+  parentRefs:
+    - { name: public-gateway, namespace: gateway-system }   # cloud LB controller or Envoy Gateway
+  hostnames: [obs.example.com]
+env:
+  OBS_EGRESS_ALLOWLIST: "*.eks.amazonaws.com"
+database:
+  existingSecret: obsplatform-db     # synced from AWS Secrets Manager / Key Vault / Secret Manager by External Secrets Operator
+networkPolicy:
+  ingressFromNamespaces: [gateway-system]
+  databaseCIDRs: ["10.0.64.0/20"]    # managed PostgreSQL (RDS/Aurora, Flexible Server, Cloud SQL) private subnet
+serviceMonitor:
+  enabled: true

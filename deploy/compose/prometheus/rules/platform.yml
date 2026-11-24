@@ -1,0 +1,54 @@
+# Alerts on the observability platform itself ("who watches the watchers").
+groups:
+  - name: platform
+    rules:
+      - alert: TelemetryPipelineDown
+        expr: up{job="otel-collector"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: otel-collector
+        annotations:
+          summary: OpenTelemetry Collector is not being scraped
+      - alert: SentinelApiDown
+        expr: up{job="sentinel-api"} == 0
+        for: 1m
+        labels:
+          severity: critical
+          service: sentinel-api
+        annotations:
+          summary: Sentinel API is down
+      - alert: SentinelInvestigationsFailing
+        expr: increase(sentinel_investigations_total{status="failed"}[10m]) > 0
+        labels:
+          severity: warning
+          service: sentinel-worker
+        annotations:
+          summary: Sentinel investigations are failing
+      - alert: SentinelQueueBacklog
+        expr: sentinel_queue_depth{queue="investigations"} > 20
+        for: 5m
+        labels:
+          severity: warning
+          service: sentinel-worker
+        annotations:
+          summary: Investigation queue is backing up
+      - alert: SentinelRemediationUnknownOutcome
+        expr: increase(sentinel_remediation_unknown_outcome_total[15m]) > 0
+        labels:
+          severity: critical
+          service: sentinel-worker
+        annotations:
+          summary: A remediation's outcome is unknown (worker stopped mid-execution)
+          description: >-
+            Action {{ $labels.action }} was executing when its worker stopped. It is marked
+            failed and will not be retried. Check the target service before re-running it.
+      - alert: HostMemoryHigh
+        expr: |
+          sum(system_memory_usage_bytes{state="used"}) / sum(system_memory_usage_bytes) > 0.9
+        for: 5m
+        labels:
+          severity: warning
+          service: infrastructure
+        annotations:
+          summary: Host memory above 90%

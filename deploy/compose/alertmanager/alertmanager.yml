@@ -1,0 +1,24 @@
+# Routes every alert to Sentinel. Sentinel does correlation/dedup across alert groups, so
+# Alertmanager only needs light grouping.
+route:
+  receiver: sentinel
+  group_by: [alertname, service]
+  group_wait: 10s
+  group_interval: 30s
+  repeat_interval: 1h
+
+receivers:
+  - name: sentinel
+    webhook_configs:
+      - url: http://sentinel-api:8000/api/v1/alerts/alertmanager
+        send_resolved: true
+        max_alerts: 50
+        http_config:
+          authorization:
+            type: Bearer
+            credentials_file: /run/secrets/webhook_token
+
+inhibit_rules:
+  - source_matchers: [severity="critical"]
+    target_matchers: [severity="warning"]
+    equal: [service]

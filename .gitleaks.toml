@@ -1,0 +1,7 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and documented placeholders"
+paths = ['''sentinel/tests/''', '''\.env\.example$''', '''secrets\.env\.example$''']
+regexes = ['''CHANGE_ME''', '''<REDACTED_[A-Z_]+>''']

@@ -1,0 +1,253 @@
+# Sentinel full stack: platform + observability backends + instrumented demo workload.
+#   cp .env.example .env && ../../scripts/bootstrap-env.sh   (generates secrets)
+#   docker compose up -d --build
+# Console: http://localhost:8000  Grafana: http://localhost:3000  Prometheus: http://localhost:9090
+#
+# Optional discovery service (discovery/, the Go platform) that gives Sentinel infrastructure
+# context. Off by default; start it with `make up-discovery` (profile "discovery").
+#   Discovery UI: http://localhost:8090 (dev token: dev-admin)
+name: sentinel
+
+x-sentinel-env: &sentinel-env
+  SENTINEL_ENV: ${SENTINEL_ENV:-dev}
+  SENTINEL_DATABASE_URL: postgresql+psycopg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/sentinel
+  SENTINEL_API_KEYS: ${SENTINEL_API_KEYS}
+  SENTINEL_WEBHOOK_TOKEN: ${SENTINEL_WEBHOOK_TOKEN}
+  SENTINEL_ACTION_TOKEN: ${DEMO_ADMIN_TOKEN}
+  SENTINEL_PROMETHEUS_URL: http://prometheus:9090
+  SENTINEL_LOKI_URL: http://loki:3100
+  SENTINEL_TEMPO_URL: http://tempo:3200
+  SENTINEL_LLM_PROVIDER: ${SENTINEL_LLM_PROVIDER:-deterministic}
+  SENTINEL_LLM_MODEL: ${SENTINEL_LLM_MODEL:-}
+  SENTINEL_OPENAI_API_KEY: ${SENTINEL_OPENAI_API_KEY:-}
+  SENTINEL_ANTHROPIC_API_KEY: ${SENTINEL_ANTHROPIC_API_KEY:-}
+  SENTINEL_NOTIFICATION_WEBHOOK_URL: ${SENTINEL_NOTIFICATION_WEBHOOK_URL:-}
+  SENTINEL_RATE_LIMIT_PER_MINUTE: ${SENTINEL_RATE_LIMIT_PER_MINUTE:-600}
+  SENTINEL_OTEL_ENABLED: "true"
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  # Empty = infrastructure context disabled. `make up-discovery` sets both.
+  SENTINEL_DISCOVERY_URL: ${SENTINEL_DISCOVERY_URL:-}
+  SENTINEL_DISCOVERY_TOKEN: ${SENTINEL_DISCOVERY_TOKEN:-}
+
+x-shop-env: &shop-env
+  ADMIN_TOKEN: ${DEMO_ADMIN_TOKEN}
+  OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4318
+  METRIC_INTERVAL_MS: "10000"
+
+x-hardening: &hardening
+  read_only: true
+  security_opt: ["no-new-privileges:true"]
+  cap_drop: [ALL]
+  tmpfs: ["/tmp"]
+  restart: unless-stopped
+
+services:
+  # ---------------------------------------------------------------- data
+  postgres:
+    image: postgres:17.6-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      POSTGRES_DB: sentinel
+    volumes: ["pgdata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d sentinel"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- sentinel
+  sentinel-migrate:
+    image: sentinel:${SENTINEL_TAG:-dev}
+    build: ../../sentinel
+    command: ["sentinel", "migrate"]
+    environment: *sentinel-env
+    depends_on:
+      postgres: {condition: service_healthy}
+    <<: *hardening
+    restart: "no"
+
+  sentinel-api:
+    image: sentinel:${SENTINEL_TAG:-dev}
+    environment:
+      <<: *sentinel-env
+      OTEL_SERVICE_NAME: sentinel-api
+    ports: ["8000:8000"]
+    depends_on:
+      sentinel-migrate: {condition: service_completed_successfully}
+    <<: *hardening
+
+  sentinel-worker:
+    image: sentinel:${SENTINEL_TAG:-dev}
+    command: ["sentinel", "worker"]
+    environment:
+      <<: *sentinel-env
+      SENTINEL_SERVICE_NAME: sentinel-worker
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:9100/metrics', timeout=2)"]
+      interval: 15s
+      timeout: 3s
+      retries: 3
+    depends_on:
+      sentinel-migrate: {condition: service_completed_successfully}
+    <<: *hardening
+
+  # ---------------------------------------------------------------- observability backends
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.130.0
+    command: ["--config=/etc/otelcol/config.yaml"]
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+    volumes: ["./otel-collector/config.yaml:/etc/otelcol/config.yaml:ro"]
+    ports: ["4317:4317", "4318:4318"]
+    depends_on: [loki, tempo]
+    restart: unless-stopped
+
+  prometheus:
+    image: prom/prometheus:v3.5.0
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=7d
+      - --web.enable-lifecycle
+    volumes:
+      - ./prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./prometheus/rules:/etc/prometheus/rules:ro
+      - promdata:/prometheus
+    ports: ["9090:9090"]
+    restart: unless-stopped
+
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    command: ["--config.file=/etc/alertmanager/alertmanager.yml", "--storage.path=/alertmanager"]
+    volumes: ["./alertmanager/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro"]
+    secrets: [webhook_token]
+    ports: ["9093:9093"]
+    restart: unless-stopped
+
+  loki:
+    image: grafana/loki:3.5.3
+    command: ["-config.file=/etc/loki/loki.yaml"]
+    volumes: ["./loki/loki.yaml:/etc/loki/loki.yaml:ro", "lokidata:/loki"]
+    ports: ["3100:3100"]
+    restart: unless-stopped
+
+  tempo:
+    image: grafana/tempo:2.8.2
+    command: ["-config.file=/etc/tempo/tempo.yaml"]
+    user: "0"   # local-disk backend needs write access to the named volume
+    volumes: ["./tempo/tempo.yaml:/etc/tempo/tempo.yaml:ro", "tempodata:/var/tempo"]
+    ports: ["3200:3200"]
+    restart: unless-stopped
+
+  grafana:
+    image: grafana/grafana:12.1.0
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD}
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_DASHBOARDS_DEFAULT_HOME_DASHBOARD_PATH: /var/lib/grafana/dashboards/shop-services.json
+    volumes:
+      - ./grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - grafanadata:/var/lib/grafana
+    ports: ["3000:3000"]
+    depends_on: [prometheus, loki, tempo]
+    restart: unless-stopped
+
+  # ---------------------------------------------------------------- demo workload
+  frontend:
+    image: shop:${SHOP_TAG:-dev}
+    build: ../../demo-services/shop
+    environment: {<<: *shop-env, SERVICE_NAME: frontend}
+    ports: ["8080:8080"]
+    <<: *hardening
+  checkout:
+    image: shop:${SHOP_TAG:-dev}
+    environment: {<<: *shop-env, SERVICE_NAME: checkout}
+    ports: ["8081:8080"]
+    <<: *hardening
+  payments:
+    image: shop:${SHOP_TAG:-dev}
+    environment: {<<: *shop-env, SERVICE_NAME: payments}
+    ports: ["8082:8080"]
+    <<: *hardening
+  inventory:
+    image: shop:${SHOP_TAG:-dev}
+    environment: {<<: *shop-env, SERVICE_NAME: inventory}
+    ports: ["8083:8080"]
+    <<: *hardening
+  loadgen:
+    image: shop:${SHOP_TAG:-dev}
+    command: ["python", "loadgen.py"]
+    environment: {TARGET: "http://frontend:8080", RPS: "8"}
+    depends_on: [frontend, checkout, payments, inventory]
+    <<: *hardening
+
+  # ---------------------------------------------------------------- discovery (profile: discovery)
+  # Development settings only: dev-mode auth with static tokens, which the platform refuses in
+  # production. Its own database keeps the two products' schemas and lifecycles separate.
+  discovery-db:
+    profiles: [discovery]
+    image: postgres:18.3-alpine
+    environment:
+      POSTGRES_USER: obs
+      POSTGRES_DB: obsplatform
+      POSTGRES_PASSWORD: ${DISCOVERY_DB_PASSWORD:-obs-local-dev}
+    volumes: ["discoverydata:/var/lib/postgresql/data"]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U obs -d obsplatform"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    restart: unless-stopped
+
+  discovery-migrate:
+    profiles: [discovery]
+    build: {context: ../../discovery, dockerfile: deploy/docker/Dockerfile}
+    image: obsplatform:${DISCOVERY_TAG:-dev}
+    command: ["migrate", "up"]
+    environment: &discovery-env
+      OBS_DATABASE_URL: postgres://obs:${DISCOVERY_DB_PASSWORD:-obs-local-dev}@discovery-db:5432/obsplatform?sslmode=disable
+      OBS_ENV: development
+      OBS_AUTH_MODE: dev
+    depends_on:
+      discovery-db: {condition: service_healthy}
+    restart: "no"
+
+  discovery-seed:
+    profiles: [discovery]
+    image: obsplatform:${DISCOVERY_TAG:-dev}
+    command: ["seed"]
+    environment: *discovery-env
+    depends_on:
+      discovery-migrate: {condition: service_completed_successfully}
+    restart: "no"
+
+  discovery:
+    profiles: [discovery]
+    image: obsplatform:${DISCOVERY_TAG:-dev}
+    command: ["serve"]
+    environment: *discovery-env
+    ports: ["8090:8080"]
+    depends_on:
+      discovery-seed: {condition: service_completed_successfully}
+    read_only: true
+    security_opt: ["no-new-privileges:true"]
+    cap_drop: [ALL]
+    restart: unless-stopped
+
+secrets:
+  webhook_token:
+    environment: SENTINEL_WEBHOOK_TOKEN
+
+volumes:
+  pgdata:
+  promdata:
+  lokidata:
+  tempodata:
+  grafanadata:
+  discoverydata:

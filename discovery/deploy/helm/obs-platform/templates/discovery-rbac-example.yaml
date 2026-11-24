@@ -1,0 +1,42 @@
+{{- if .Values.discoveryRBAC.create }}
+# Read-only access for the Kubernetes discovery provider. Apply this in each
+# *target* cluster and give the platform the bound ServiceAccount's token via
+# a credential reference. It grants get/list/watch only; no write verbs.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ include "obs.fullname" . }}-discovery-reader
+  labels: {{- include "obs.labels" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: [nodes, namespaces, pods, services]
+    verbs: [get, list, watch]
+  - apiGroups: [apps]
+    resources: [deployments, replicasets]
+    verbs: [get, list, watch]
+  - apiGroups: [metrics.k8s.io]
+    resources: [nodes, pods]
+    verbs: [get, list]
+  - nonResourceURLs: [/version]
+    verbs: [get]
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ include "obs.fullname" . }}-discovery-reader
+  labels: {{- include "obs.labels" . | nindent 4 }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ include "obs.fullname" . }}-discovery-reader
+  labels: {{- include "obs.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ include "obs.fullname" . }}-discovery-reader
+subjects:
+  - kind: ServiceAccount
+    name: {{ include "obs.fullname" . }}-discovery-reader
+    namespace: {{ .Release.Namespace }}
+{{- end }}

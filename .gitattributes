@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.ipynb linguist-documentation
+*.png binary
+*.jpg binary
+*.mp3 binary
+*.mp4 binary
+*.pdf binary
+*.docx binary
+*.xlsx binary
+uv.lock linguist-generated
+deploy/compose/grafana/dashboards/*.json linguist-generated

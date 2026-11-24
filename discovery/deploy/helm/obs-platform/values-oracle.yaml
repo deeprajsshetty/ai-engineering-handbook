@@ -1,0 +1,14 @@
+# Overlay: Oracle Database (19c or later) as the platform's own store
+# (ADR 0011). Combine with values-public-cloud.yaml or values-private-cloud.yaml:
+#   helm upgrade --install obs deploy/helm/obs-platform \
+#     -f deploy/helm/obs-platform/values-private-cloud.yaml \
+#     -f deploy/helm/obs-platform/values-oracle.yaml
+#
+# Create the Secret yourself (or sync it with External Secrets Operator):
+#   DATABASE_URL=oracle://obs:<password>@oracle.db.internal:1521/OBSPDB
+# The schema owner needs CREATE SESSION, CREATE TABLE, CREATE SEQUENCE and a
+# tablespace quota; see docs/operations/configuration.md.
+database:
+  driver: oracle
+networkPolicy:
+  databasePort: 1521

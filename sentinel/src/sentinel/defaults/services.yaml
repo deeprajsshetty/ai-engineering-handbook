@@ -1,0 +1,23 @@
+# Static service catalog. Merged at runtime with dependencies discovered from traces
+# (OpenTelemetry Collector `servicegraph` connector -> Prometheus).
+services:
+  - name: frontend
+    team: web
+    tier: "1"
+    description: Customer-facing storefront API.
+    dependencies: [checkout, inventory]
+  - name: checkout
+    team: commerce
+    tier: "1"
+    description: Orchestrates order placement.
+    dependencies: [payments, inventory]
+  - name: payments
+    team: payments
+    tier: "1"
+    description: Charges customer payment methods.
+    dependencies: []
+  - name: inventory
+    team: commerce
+    tier: "2"
+    description: Stock levels and reservations.
+    dependencies: []

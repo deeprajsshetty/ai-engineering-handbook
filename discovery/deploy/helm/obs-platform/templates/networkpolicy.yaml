@@ -1,0 +1,68 @@
+{{- if .Values.networkPolicy.enabled }}
+# Default-deny for the platform's pods, then only what each role needs.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "obs.fullname" . }}-api
+  labels: {{- include "obs.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "obs.selector" . | nindent 6 }}
+      app.kubernetes.io/component: api
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports: [{ port: 8080 }]
+      {{- with .Values.networkPolicy.ingressFromNamespaces }}
+      from:
+        {{- range . }}
+        - namespaceSelector: { matchLabels: { kubernetes.io/metadata.name: {{ . }} } }
+        {{- end }}
+      {{- end }}
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - ports: [{ port: {{ .Values.networkPolicy.databasePort }} }]
+      {{- with .Values.networkPolicy.databaseCIDRs }}
+      to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      {{- end }}
+    {{- with .Values.networkPolicy.providerEgressCIDRs }}
+    # The API's "validate connection" check probes provider endpoints.
+    - ports: [{ port: 443 }, { port: 6443 }]
+      to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "obs.fullname" . }}-worker
+  labels: {{- include "obs.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "obs.selector" . | nindent 6 }}
+      app.kubernetes.io/component: worker
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    - ports: [{ port: 53, protocol: UDP }, { port: 53, protocol: TCP }]
+    - ports: [{ port: {{ .Values.networkPolicy.databasePort }} }]
+      {{- with .Values.networkPolicy.databaseCIDRs }}
+      to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+      {{- end }}
+    {{- with .Values.networkPolicy.providerEgressCIDRs }}
+    - ports: [{ port: 443 }, { port: 6443 }]
+      to:
+        {{- range . }}
+        - ipBlock: { cidr: {{ . }} }
+        {{- end }}
+    {{- end }}
+{{- end }}

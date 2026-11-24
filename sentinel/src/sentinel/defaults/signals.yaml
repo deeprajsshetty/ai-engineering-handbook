@@ -1,0 +1,16 @@
+# PromQL / LogQL / TraceQL templates used by the Telemetry Analysis Agent.
+# `$service` is substituted with a catalog-validated service name.
+metrics:
+  request_rate: 'sum(rate(shop_server_requests_total{service="$service"}[1m]))'
+  error_rate: >-
+    (sum(rate(shop_server_requests_total{service="$service",status_class="5xx"}[1m])) or vector(0))
+    / clamp_min(sum(rate(shop_server_requests_total{service="$service"}[1m])), 0.001)
+  latency_p95: >-
+    histogram_quantile(0.95, sum by (le) (rate(shop_server_duration_seconds_bucket{service="$service"}[1m])))
+logs:
+  errors: '{service_name="$service"} | severity_text=~"(?i)error|critical|fatal"'
+traces:
+  errors: '{ status = error }'
+  slow: '{ duration > 500ms }'
+service_graph:
+  edges: 'sum by (client, server) (increase(traces_service_graph_request_total[15m]))'
