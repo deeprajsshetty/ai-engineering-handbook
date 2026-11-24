@@ -21,7 +21,7 @@ import streamlit as st
 # provide the same bubble-style UI natively — no extra dependency needed.
 # The `from streamlit_chat import message` line has been removed.
 
-# loading the OpenAI api key from .env (OPENAI_API_KEY="sk-********")
+# loading the OpenAI api key from .env (OPENAI_API_KEY="your-openai-api-key", a dummy placeholder; put your real key in handbook/.env (template: handbook/.env.example))
 from dotenv import load_dotenv, find_dotenv
 load_dotenv(find_dotenv(), override=True)
 
